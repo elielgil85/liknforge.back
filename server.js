@@ -16,7 +16,8 @@ mongoose.connect(process.env.MONGODB_URI)
 const urlSchema = new mongoose.Schema({
   original_url: { type: String, required: true },
   short_code: { type: String, required: true, unique: true },
-  created_at: { type: Date, default: Date.now }
+  created_at: { type: Date, default: Date.now },
+  expires_at: { type: Date, required: false } // New field for expiration date
 });
 
 const Url = mongoose.model('Url', urlSchema);
@@ -35,6 +36,30 @@ function generateShortCode(length = 6) {
     result += chars.charAt(Math.floor(Math.random() * chars.length));
   }
   return result;
+}
+
+// Parses expiration string (e.g., '1h', '7d') and returns a Date object
+function parseExpiration(expiresIn) {
+  if (!expiresIn) return null;
+
+  const value = parseInt(expiresIn.slice(0, -1));
+  const unit = expiresIn.slice(-1);
+  const now = new Date();
+
+  switch (unit) {
+    case 'm':
+      now.setMinutes(now.getMinutes() + value);
+      break;
+    case 'h':
+      now.setHours(now.getHours() + value);
+      break;
+    case 'd':
+      now.setDate(now.getDate() + value);
+      break;
+    default:
+      return null; // Invalid unit
+  }
+  return now;
 }
 
 // --- API Routes ---
@@ -109,7 +134,7 @@ app.get('/', (req, res) => {
  * @access Public
  */
 app.post('/shorten', async (req, res) => {
-  const { long_url } = req.body;
+  const { long_url, expires_in } = req.body;
 
   // Basic validation for the long URL
   if (!long_url || !long_url.startsWith('http')) {
@@ -129,15 +154,25 @@ app.post('/shorten', async (req, res) => {
       }
     }
 
+    let expiresAt = parseExpiration(expires_in);
+
+    // If no expiration is provided, set a default (e.g., 1 minute for testing)
+    if (!expiresAt) {
+      const now = new Date();
+      now.setMinutes(now.getMinutes() + 1); // Default to 1 minute expiration
+      expiresAt = now;
+    }
+
     // Save the new URL to the database
     const newUrl = new Url({
       original_url: long_url,
-      short_code: shortCode
+      short_code: shortCode,
+      expires_at: expiresAt // Save expiration date
     });
 
     await newUrl.save();
 
-    res.status(201).json({ short_code: shortCode });
+    res.status(201).json({ short_code: shortCode, expires_at: expiresAt });
 
   } catch (error) {
     console.error('Error creating short URL:', error);
@@ -158,6 +193,10 @@ app.get('/:shortCode', async (req, res) => {
     const urlEntry = await Url.findOne({ short_code: shortCode });
 
     if (urlEntry) {
+      // Check if the URL has expired
+      if (urlEntry.expires_at && urlEntry.expires_at < new Date()) {
+        return res.status(410).json({ error: 'Short URL has expired.' }); // 410 Gone
+      }
       // Always return the long URL as JSON
       return res.status(200).json({ long_url: urlEntry.original_url });
     } else {
